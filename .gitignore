@@ -1,0 +1,20 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+/venv/
+.venv/
+
+# --- Secrets ---
+/.env
+.env.*
+!.env.example
+
+# --- macOS ---
+.DS_Store
+
+# --- Corpus scrapé (régénérable via scripts/scrape_anthropic.py) ---
+/data/
+
+# --- Notes locales ---
+/AGENTS.md

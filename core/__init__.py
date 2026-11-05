@@ -1,0 +1,3 @@
+"""
+Lighthouse core package.
+"""
