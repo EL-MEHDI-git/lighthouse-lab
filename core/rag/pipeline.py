@@ -9,7 +9,7 @@ from core.config import (
     LLM_MODEL,
     DEFAULT_DOMAIN,
 )
-from core.retrieval.vector_search import get_context_for_query, vector_search
+from core.retrieval.search import search, build_context
 from core.generation.llm_client import generate_response
 from core.generation.prompts import RAG_SYSTEM_PROMPT, RAG_USER_PROMPT
 from core.memory.conversation import ConversationMemory
@@ -69,8 +69,9 @@ class RAGPipeline:
         # Récupérer ou créer la mémoire de conversation
         memory = self.get_or_create_conversation(session_id)
         
-        # Récupérer le contexte pertinent
-        context = get_context_for_query(question, self.top_k, self.max_context_length, self.domain)
+        # Récupérer le contexte pertinent (une seule recherche)
+        results = search(question, self.top_k, self.domain)
+        context = build_context(results, self.max_context_length)
         
         # Construire le prompt avec l'historique si nécessaire
         user_prompt = RAG_USER_PROMPT.format(question=question)
@@ -94,8 +95,8 @@ class RAGPipeline:
         memory.add_message("user", question)
         memory.add_message("assistant", response, {"context": context})
         
-        # Récupérer les sources
-        sources = vector_search(question, self.top_k, self.domain)
+        # Récupérer les sources (déjà calculées, aucune requête supplémentaire)
+        sources = results
         
         return {
             "answer": response,

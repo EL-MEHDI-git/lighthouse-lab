@@ -95,3 +95,52 @@ def search_similar(
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(sql, params)
         return cur.fetchall()
+
+
+def search_lexical(
+    conn,
+    query: str,
+    top_k: int = 40,
+    domain: Optional[str] = None
+) -> list[dict]:
+    """
+    Recherche lexicale (full-text PostgreSQL) sur `content_tsv`.
+
+    Utilise `websearch_to_tsquery` qui accepte une saisie libre
+    (mots, "expression exacte", OR, -exclusion) sans jamais lever d'erreur.
+    """
+    where_clause = "AND domain = %s" if domain else ""
+
+    sql = f"""
+        SELECT id, domain, source, chunk_index, content,
+               ts_rank_cd(content_tsv, websearch_to_tsquery('english', %s)) AS lexical_score
+        FROM documents
+        WHERE content_tsv @@ websearch_to_tsquery('english', %s)
+        {where_clause}
+        ORDER BY lexical_score DESC
+        LIMIT %s
+    """
+
+    params = [query, query]
+    if domain:
+        params.append(domain)
+    params.append(top_k)
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+def get_chunks_with_embeddings(conn, ids: list[int]) -> list[dict]:
+    """Récupère des chunks (avec leur embedding) par identifiant."""
+    if not ids:
+        return []
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """SELECT id, domain, source, chunk_index, content, embedding
+               FROM documents
+               WHERE id = ANY(%s)""",
+            (ids,)
+        )
+        return cur.fetchall()

@@ -55,6 +55,12 @@ MAX_CONTEXT_LENGTH = 4000          # Longueur max du contexte transmis au LLM
 RETRIEVAL_CANDIDATES = 40          # Candidats récupérés avant MMR / rerank
 MMR_LAMBDA = 0.7                   # 0 = diversité max, 1 = pertinence pure
 
+# --- Hybrid search (dense + lexical, fusion RRF) ---
+HYBRID_ENABLED = True              # False = recherche dense seule (A/B testing)
+LEXICAL_CANDIDATES = 40            # Candidats renvoyés par le full-text Postgres
+RRF_K = 60                         # Constante RRF (60 = valeur standard de la littérature)
+LEXICAL_WEIGHT = 0.5               # Poids du lexical dans la fusion (< 1 = le dense domine)
+
 # =============================================================================
 # MÉMOIRE DE CONVERSATION
 # =============================================================================
