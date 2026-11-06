@@ -10,7 +10,7 @@ from typing import Optional
 
 import numpy as np
 
-from core.config import TOP_K, RETRIEVAL_CANDIDATES, MMR_LAMBDA, MAX_CONTEXT_LENGTH
+from core.config import TOP_K, RETRIEVAL_CANDIDATES, MMR_LAMBDA
 from core.db.connection import get_connection, search_similar
 from core.embeddings.embedder import embed_text
 
@@ -31,9 +31,17 @@ def _mmr(
     query_embedding: list[float],
     candidates: list[dict],
     top_k: int,
-    lam: float = MMR_LAMBDA
+    lam: float = MMR_LAMBDA,
+    relevance: Optional[list[float]] = None
 ) -> list[dict]:
-    """Sélectionne top_k candidats diversifiés via Maximal Marginal Relevance."""
+    """
+    Sélectionne top_k candidats diversifiés via Maximal Marginal Relevance.
+
+    Args:
+        relevance: signal de pertinence à utiliser (ex. score RRF d'une fusion
+            hybride). Par défaut : similarité cosine avec la requête.
+            Le cosine sert toujours à mesurer la redondance entre candidats.
+    """
     if not candidates:
         return []
 
@@ -41,19 +49,27 @@ def _mmr(
     matrix = np.vstack([_normalize(_to_array(c["embedding"])) for c in candidates])
     similarities = matrix @ query
 
+    if relevance is None:
+        relevance_scores = similarities
+    else:
+        relevance_scores = np.asarray(relevance, dtype=np.float32)
+        highest = float(relevance_scores.max())
+        if highest > 0:
+            relevance_scores = relevance_scores / highest
+
     selected: list[int] = []
     remaining = list(range(len(candidates)))
 
     while remaining and len(selected) < top_k:
         if not selected:
-            best = max(remaining, key=lambda i: similarities[i])
+            best = max(remaining, key=lambda i: relevance_scores[i])
         else:
             chosen = matrix[selected]
             best_score = -np.inf
             best = remaining[0]
             for i in remaining:
                 redundancy = float(np.max(chosen @ matrix[i]))
-                score = lam * float(similarities[i]) - (1.0 - lam) * redundancy
+                score = lam * float(relevance_scores[i]) - (1.0 - lam) * redundancy
                 if score > best_score:
                     best_score = score
                     best = i
@@ -64,7 +80,7 @@ def _mmr(
     results = []
     for i in selected:
         item = {k: v for k, v in candidates[i].items() if k != "embedding"}
-        item["similarity"] = float(item["similarity"])
+        item["similarity"] = float(similarities[i])
         results.append(item)
     return results
 
@@ -100,35 +116,3 @@ def vector_search(
         return search_similar(conn, query_embedding, top_k, domain)
     finally:
         conn.close()
-
-
-def get_context_for_query(
-    query: str,
-    top_k: int = TOP_K,
-    max_length: int = MAX_CONTEXT_LENGTH,
-    domain: Optional[str] = None
-) -> str:
-    """Récupère le contexte formaté pour une requête."""
-    results = vector_search(query, top_k, domain)
-
-    if not results:
-        return "Aucun contexte pertinent trouvé."
-
-    context_parts = []
-    current_length = 0
-
-    for result in results:
-        chunk_text = (
-            f"Source: {result['source']}\n"
-            f"Domaine: {result['domain']}\n"
-            f"Contenu: {result['content']}\n"
-            f"Similarité: {result['similarity']:.2f}"
-        )
-
-        if current_length + len(chunk_text) > max_length:
-            break
-
-        context_parts.append(chunk_text)
-        current_length += len(chunk_text)
-
-    return "\n\n---\n\n".join(context_parts)

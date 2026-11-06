@@ -17,6 +17,7 @@ Lighthouse is a RAG (Retrieval-Augmented Generation) system designed to:
 | Embeddings | `BAAI/bge-m3` (local, 1024 dims) | Multilingue, 8192 ctx, excellent en retrieval dense |
 | LLM | Ollama (`llama3.2`) | 100 % local, aucune clé API |
 | Chunking | `langchain-text-splitters` (Markdown-aware) | Sections sémantiques plutôt que coupes arbitraires |
+| Recherche | pgvector (dense) + Postgres FTS (lexical), fusion RRF | Comprend le sens **et** les termes exacts, sans dépendance supplémentaire |
 | Extraction | `trafilatura` | Supprime nav/footer/boilerplate automatiquement |
 
 ## Prerequisites
@@ -115,7 +116,7 @@ lighthouse-lab/
 │   ├── db/                 # Connexion, schéma, requêtes SQL
 │   ├── embeddings/         # Encodage des textes (bge-m3)
 │   ├── ingestion/          # Chargement + chunking des documents
-│   ├── retrieval/          # Recherche vectorielle + MMR
+│   ├── retrieval/          # dense + lexical, fusion RRF, MMR
 │   ├── generation/         # Client Ollama + prompts
 │   ├── memory/             # Historique de conversation
 │   └── rag/                # Orchestrateur du pipeline
@@ -209,6 +210,24 @@ docker compose down -v && docker compose up -d
 > `schema.sql` n'est exécuté **qu'à la création du volume**. Après un simple `down` / `up`,
 > la table existe toujours. Pour la recréer il faut `down -v` (supprime le volume `pgdata`).
 
+### Migrer une base existante (hybrid search)
+
+Une base créée **avant** le hybrid search n'a pas la colonne `content_tsv`. Sans elle, le
+full-text échoue. Migration idempotente :
+
+```sql
+ALTER TABLE documents
+  ADD COLUMN IF NOT EXISTS content_tsv tsvector
+  GENERATED ALWAYS AS (to_tsvector('english', content)) STORED;
+
+CREATE INDEX IF NOT EXISTS documents_content_tsv_idx ON documents USING GIN (content_tsv);
+CREATE INDEX IF NOT EXISTS documents_domain_idx      ON documents (domain);
+```
+
+```bash
+docker exec -i lighthouse-db psql -U lighthouse -d lighthouse < migration.sql
+```
+
 ## Retrieval pipeline (current state)
 
 Voici exactement ce qui se passe quand tu poses une question, et **où** chaque étape s'exécute.
@@ -219,45 +238,60 @@ question
    │
    │ ① embedding de la question          → core/embeddings/embedder.py
    │    bge-m3 · 1024 dims · normalisé · local (MPS/CPU)
-   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ ② RECHERCHE COSINE — PostgreSQL + pgvector                  │
-│    SQL : 1 - (embedding <=> query_vec) AS similarity        │
-│    ORDER BY embedding <=> query_vec  LIMIT 40               │
-│    → RETRIEVAL_CANDIDATES = 40 candidats                    │
-│    (scan complet : aucun index HNSW/IVFFlat installé)       │
-└─────────────────────────────────────────────────────────────┘
-   │  40 chunks + leurs embeddings
-   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ ③ MMR — Python / numpy                                      │
-│    score = 0.7 × similarité − 0.3 × redondance max          │
-│    sélection itérative → TOP_K = 8 chunks diversifiés       │
-└─────────────────────────────────────────────────────────────┘
    │
-   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ ④ CONTEXTE — Python                                         │
-│    concatène les chunks jusqu'à MAX_CONTEXT_LENGTH = 4000   │
-└─────────────────────────────────────────────────────────────┘
-   │
-   ▼
-⑤ GÉNÉRATION — Ollama (llama3.2, local)
+   ├──────────────────────────────┬──────────────────────────────────┐
+   ▼                              ▼                                  │
+┌──────────────────────┐   ┌──────────────────────────────────┐     │
+│ ②a DENSE             │   │ ②b LEXICAL                       │     │
+│ pgvector · cosine    │   │ Postgres full-text               │     │
+│ ORDER BY embedding   │   │ websearch_to_tsquery('english')  │     │
+│ LIMIT 40             │   │ ts_rank_cd → LIMIT 40            │     │
+└──────────────────────┘   └──────────────────────────────────┘     │
+   │ 40 candidats              │ 40 candidats                        │
+   └────────────┬──────────────┘                                    │
+                ▼                                                   │
+┌──────────────────────────────────────────────────────┐            │
+│ ③ FUSION RRF — Python                                │            │
+│ score = 1/(60+rang_dense) + 0.5/(60+rang_lexical)    │            │
+│ → 40 meilleurs candidats fusionnés                   │            │
+└──────────────────────────────────────────────────────┘            │
+                │                                                   │
+                ▼                                                   │
+┌──────────────────────────────────────────────────────┐            │
+│ ④ MMR — Python / numpy                               │            │
+│ pertinence = score RRF · redondance = cosine         │            │
+│ score = 0.7 × RRF − 0.3 × redondance                 │            │
+│ → TOP_K = 8 chunks diversifiés                        │            │
+└──────────────────────────────────────────────────────┘            │
+                │                                                   │
+                ▼                                                   │
+┌──────────────────────────────────────────────────────┐            │
+│ ⑤ CONTEXTE — concatène jusqu'à 4 000 caractères      │            │
+└──────────────────────────────────────────────────────┘            │
+                │                                                   │
+                ▼                                                   │
+⑥ GÉNÉRATION — Ollama (llama3.2, local) ◄───────────────────────────┘
 ```
 
 **Points importants :**
 
-- **Le cosine n'est pas remplacé par le MMR** — les deux travaillent en séquence.
-  Postgres classe les 6 942 chunks par similarité cosine et renvoie les 40 meilleurs ;
-  MMR choisit ensuite 8 parmi ces 40 en pénalisant ceux qui se ressemblent entre eux.
-  Sans l'étape ②, MMR n'aurait aucun candidat ; sans l'étape ③, on renverrait 8 quasi-copies.
+- **Deux recherches en parallèle, une seule fusion.** Le dense comprend le *sens*, le lexical
+  trouve les *mots exacts* (acronymes, noms propres, chiffres). Aucun des deux ne gagne seul.
+- **RRF ne compare que des rangs, jamais des scores.** Cosine ∈ [-1, 1] et `ts_rank_cd` ∈ [0, ~1]
+  n'ont ni la même échelle ni la même distribution : les additionner exigerait une normalisation
+  fragile. `1/(60+rang)` est insensible à l'échelle → zéro réglage.
+- **`LEXICAL_WEIGHT = 0.5`** — le lexical pèse moitié moins que le dense. `ts_rank_cd` n'est pas
+  BM25 : il récompense les mots fréquents du corpus (« model », « standard »), ce qui fait remonter
+  du bruit. À 1.0, un chunk hors sujet apparaissait ; à 0.5, il disparaît.
+- **MMR utilise le score RRF comme pertinence**, pas le cosine. Sinon un chunk trouvé *uniquement*
+  par le lexical (cosine moyen) serait éliminé, ce qui annulerait tout l'intérêt du hybrid.
+  Le cosine sert seulement à mesurer la redondance **entre** candidats.
 - **Pas d'index vectoriel à ce jour.** PostgreSQL fait un scan complet (quelques ms pour ~7 000
-  chunks). Un index HNSW deviendra utile au-delà de ~100 000 chunks ; l'ajouter maintenant
-  ajouterait un paramètre à régler (`ef_search`) pour un gain invisible.
-- **Recherche exacte = meilleure qualité.** Un scan complet ne fait aucun compromis
-  d'approximation, contrairement à un index ANN.
-- **Le lexical n'existe pas encore.** Seul le dense est utilisé : c'est pour ça qu'un terme
-  rare ou un acronyme peut être mal classé. C'est le rôle du hybrid search (étape 2 de la roadmap).
+  chunks). Un index HNSW deviendra utile au-delà de ~100 000 chunks.
+- **Index GIN sur `content_tsv`** — sans lui, le full-text ferait aussi un scan complet.
+- **Recherche exacte = meilleure qualité** côté dense : aucun compromis d'approximation.
+- **Limite connue :** le lexical est configuré en `'english'`. Une question en français ne matchera
+  pas lexicalement — mais le dense porte seul, la fusion restant correcte.
 
 ### État des lieux
 
@@ -269,7 +303,7 @@ question
 | Base pgvector — 486 docs / 6 942 chunks, 0 doublon | ✅ à jour |
 | Recherche cosine (Postgres) | ✅ fait |
 | Diversité MMR | ✅ fait |
-| **Hybrid search (dense + lexical, RRF)** | ❌ **pas encore** |
+| **Hybrid search** (dense + lexical, RRF) | ✅ fait |
 | **Reranker (`bge-reranker-v2-m3`)** | ❌ pas encore |
 | Contextual retrieval | ❌ pas encore |
 | Golden set / évaluation | ❌ pas encore |
@@ -381,7 +415,34 @@ pour les sections trop longues, puis filtrage et déduplication.
 **Pourquoi :** un contexte trop long dilue l'attention du LLM et allonge la génération. On préfère
 8 chunks pertinents à 30 chunks moyens.
 
-### 8. Golden set et évaluation (à venir)
+### 8. Hybrid search plutôt que dense seul
+
+**Décision :** interroger en parallèle le dense (pgvector) et le lexical (Postgres full-text),
+puis fusionner les deux classements par **RRF pondéré**.
+
+**Pourquoi :**
+- **Les deux méthodes échouent sur des cas complémentaires.** Le dense rate les termes rares
+  (acronyme, nom de produit, chiffre) ; le lexical rate les reformulations. Mesuré sur notre
+  corpus : pour la requête `interpretability`, **26 des 40 candidats lexicaux sont absents du
+  top-40 dense**.
+- **Postgres FTS plutôt que BM25 de LangChain** — même moteur que les vecteurs, index GIN,
+  filtres `domain` en SQL, rien à resynchroniser. `rank_bm25` exige un index **en RAM reconstruit
+  à chaque démarrage**.
+- **RRF plutôt qu'une somme pondérée de scores** — insensible à l'échelle des scores, donc pas de
+  normalisation fragile. Un seul paramètre à régler.
+- **`LEXICAL_WEIGHT = 0.5`** — `ts_rank_cd` n'est pas BM25 : il survalorise les mots fréquents du
+  corpus (« model », « standard »). Constaté : à `1.0`, un chunk hors sujet entrait dans le top-8 ;
+  à `0.5`, il sort.
+
+**Limites assumées :**
+- `ts_rank_cd` n'a pas la saturation de fréquence de BM25. Le reranker (étape suivante) corrigera
+  le bruit résiduel.
+- Configuration `'english'` : une question française ne matche pas lexicalement. Le dense porte
+  alors seul, la fusion restant cohérente.
+- Le mode **sparse natif de bge-m3** serait plus fidèle, mais impose de stocker des vecteurs creux
+  et un moteur capable de les interroger. Reporté.
+
+### 9. Golden set et évaluation (à venir)
 
 **Décision :** construire un jeu de questions/réponses de référence et mesurer **Recall@k** et **MRR**.
 
@@ -392,7 +453,7 @@ impression subjective. On ne peut pas améliorer ce qu'on ne mesure pas.
 
 - [x] **0. Nettoyage des données** — trafilatura, chunking Markdown, dédup, filtre de bruit
 - [x] **1. Diversité** — MMR sur un pool élargi de candidats
-- [ ] **2. Hybrid search** — dense (pgvector) + lexical (Postgres `tsvector`/`ts_rank`), fusion **RRF**
+- [x] **2. Hybrid search** — dense (pgvector) + lexical (Postgres `tsvector`/`ts_rank_cd`), fusion **RRF**
 - [ ] **3. Reranker** — `bge-reranker-v2-m3` sur 30–50 candidats → top 5
 - [ ] **4. Contextual Retrieval** — préfixer chaque chunk d'un résumé du document avant embedding
 - [ ] **5. Évaluation** — golden set, Recall@k, MRR
@@ -426,8 +487,12 @@ se font dans une seule transaction (interrompre le script ne laisse jamais de do
 | `CHUNK_OVERLAP` | Chevauchement entre chunks | `150` |
 | `MIN_CHUNK_LENGTH` | En dessous → chunk ignoré | `150` |
 | `TOP_K` | Chunks finaux envoyés au LLM | `8` |
-| `RETRIEVAL_CANDIDATES` | Candidats récupérés avant MMR / rerank | `40` |
+| `RETRIEVAL_CANDIDATES` | Candidats denses récupérés avant fusion | `40` |
 | `MMR_LAMBDA` | 0 = diversité max, 1 = pertinence pure | `0.7` |
+| `HYBRID_ENABLED` | Active dense + lexical (sinon dense seul) | `True` |
+| `LEXICAL_CANDIDATES` | Candidats full-text récupérés | `40` |
+| `RRF_K` | Constante de fusion RRF | `60` |
+| `LEXICAL_WEIGHT` | Poids du lexical dans la fusion | `0.5` |
 | `MAX_CONTEXT_LENGTH` | Longueur max du contexte (caractères) | `4000` |
 | `LLM_MODEL` | Modèle Ollama | `llama3.2` |
 | `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` | Génération | `0.7` / `1024` |
@@ -450,7 +515,7 @@ Les prompts se modifient dans `core/generation/prompts.py`.
 | `MPS backend out of memory` | lots trop gros | baisser `EMBEDDING_BATCH_SIZE` dans `core/config.py` |
 | Modèle qui se re-télécharge | cache HF vidé / autre `HF_HOME` | vérifier `~/.cache/huggingface/hub/models--BAAI--bge-m3` |
 | `Ctrl+C` pendant l'ingestion | — | **sans risque** : transaction unique, rien n'est écrit |
-| Résultats hors sujet | bruit lexical / terme rare | c'est l'objet du hybrid search + reranker (roadmap) |
+| Résultats hors sujet | bruit lexical résiduel / terme rare | ajuster `LEXICAL_WEIGHT`, ou attendre le reranker (roadmap) |
 
 > **Astuce macOS :** l'ingestion dure ~7 min et la veille peut interrompre le process.
 > Préfixez par `caffeinate -i python scripts/ingest.py`.
