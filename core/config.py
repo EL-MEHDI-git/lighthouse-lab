@@ -61,6 +61,11 @@ LEXICAL_CANDIDATES = 40            # Candidats renvoyés par le full-text Postgr
 RRF_K = 60                         # Constante RRF (60 = valeur standard de la littérature)
 LEXICAL_WEIGHT = 0.5               # Poids du lexical dans la fusion (< 1 = le dense domine)
 
+# --- Reranker (cross-encoder) ---
+RERANK_ENABLED = True              # False = on garde les scores RRF (A/B testing)
+RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+RERANK_CANDIDATES = 40             # Candidats envoyés au cross-encoder (coût = O(n))
+
 # =============================================================================
 # MÉMOIRE DE CONVERSATION
 # =============================================================================

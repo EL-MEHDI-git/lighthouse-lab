@@ -10,6 +10,7 @@ Pourquoi RRF plutôt qu'une somme pondérée de scores ?
     score(d) = Σ  1 / (k + rang_i(d))        avec k = 60
 """
 from typing import Optional
+import sys
 
 from core.config import (
     TOP_K,
@@ -17,6 +18,8 @@ from core.config import (
     LEXICAL_CANDIDATES,
     RRF_K,
     LEXICAL_WEIGHT,
+    RERANK_ENABLED,
+    RERANK_CANDIDATES,
 )
 from core.db.connection import (
     get_connection,
@@ -25,6 +28,7 @@ from core.db.connection import (
     get_chunks_with_embeddings,
 )
 from core.embeddings.embedder import embed_text
+from core.retrieval.reranker import rerank
 from core.retrieval.vector_search import _mmr
 
 
@@ -63,15 +67,17 @@ def hybrid_search(
     query: str,
     top_k: int = TOP_K,
     domain: Optional[str] = None,
+    use_rerank: Optional[bool] = None,
 ) -> list[dict]:
     """
     Recherche hybride : 40 candidats denses + 40 candidats lexicaux,
-    fusion RRF, puis MMR pour la diversité des top_k finaux.
+    fusion RRF, reranking (cross-encoder), puis MMR pour la diversité.
 
     Args:
         query: Texte de la requête
         top_k: Nombre de résultats finaux
         domain: Filtrer par domaine (optionnel)
+        use_rerank: Force le reranker on/off (None = valeur de `RERANK_ENABLED`)
     """
     query_embedding = embed_text(query)
 
@@ -102,9 +108,26 @@ def hybrid_search(
         for candidate in candidates:
             candidate["rrf_score"] = rrf_scores[candidate["id"]]
 
-        # MMR avec le score RRF comme pertinence : sans ça, un chunk trouvé
-        # uniquement par le lexical serait éliminé par son cosine moyen.
-        relevance = [candidate["rrf_score"] for candidate in candidates]
+        if use_rerank is None:
+            use_rerank = RERANK_ENABLED
+
+        # Pertinence finale : score du cross-encoder s'il est actif, sinon RRF.
+        if use_rerank:
+            try:
+                candidates = rerank(query, candidates[:RERANK_CANDIDATES])
+                relevance = [candidate["rerank_score"] for candidate in candidates]
+            except Exception as exc:
+                print(
+                    f"⚠️  Reranker indisponible ({exc}) — scores RRF conservés",
+                    file=sys.stderr,
+                )
+                relevance = [candidate["rrf_score"] for candidate in candidates]
+        else:
+            relevance = [candidate["rrf_score"] for candidate in candidates]
+
+        # MMR : pertinence = reranker/RRF, redondance = cosine.
+        # Sans pertinence fusionnée, un chunk trouvé uniquement par le lexical
+        # serait éliminé par son cosine moyen.
         return _mmr(query_embedding, candidates, top_k, relevance=relevance)
     finally:
         conn.close()
