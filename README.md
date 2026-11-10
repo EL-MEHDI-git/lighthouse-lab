@@ -116,7 +116,7 @@ lighthouse-lab/
 │   ├── db/                 # Connexion, schéma, requêtes SQL
 │   ├── embeddings/         # Encodage des textes (bge-m3)
 │   ├── ingestion/          # Chargement + chunking des documents
-│   ├── retrieval/          # dense + lexical, fusion RRF, MMR
+│   ├── retrieval/          # dense + lexical, RRF, reranker, MMR
 │   ├── generation/         # Client Ollama + prompts
 │   ├── memory/             # Historique de conversation
 │   └── rag/                # Orchestrateur du pipeline
@@ -126,7 +126,8 @@ lighthouse-lab/
 ├── scripts/
 │   ├── scrape_anthropic.py # Web scraper (trafilatura)
 │   ├── ingest.py           # Ingestion + déduplication
-│   └── query.py            # CLI interactive
+│   ├── query.py            # CLI interactive
+│   └── eval_retrieval.py   # A/B avec et sans reranker
 ├── docker-compose.yml      # PostgreSQL + pgAdmin
 ├── requirements.txt        # Python dependencies
 ├── .env.example            # Environment template (copier en .env)
@@ -163,6 +164,16 @@ result = pipeline.ask("What is Claude's approach to AI safety?")
 print(result["answer"])
 print(result["sources"])
 ```
+
+### Évaluer le retrieval (A/B)
+
+```bash
+python scripts/eval_retrieval.py
+```
+
+Compare, pour une liste de requêtes fixe, les résultats **avec** et **sans** reranker :
+top-k côte à côte, latence, et nombre de résultats communs. Utile avant/après tout
+changement dans `core/retrieval/`.
 
 ## Data pipeline (ingestion)
 
@@ -258,19 +269,26 @@ question
                 │                                                   │
                 ▼                                                   │
 ┌──────────────────────────────────────────────────────┐            │
-│ ④ MMR — Python / numpy                               │            │
-│ pertinence = score RRF · redondance = cosine         │            │
-│ score = 0.7 × RRF − 0.3 × redondance                 │            │
-│ → TOP_K = 8 chunks diversifiés                        │            │
+│ ④ RERANKER — cross-encoder (bge-reranker-v2-m3)      │            │
+│ lit (question, chunk) ensemble → pertinence réelle   │            │
+│ → 40 candidats re-triés                              │            │
 └──────────────────────────────────────────────────────┘            │
                 │                                                   │
                 ▼                                                   │
 ┌──────────────────────────────────────────────────────┐            │
-│ ⑤ CONTEXTE — concatène jusqu'à 4 000 caractères      │            │
+│ ⑤ MMR — Python / numpy                               │            │
+│ pertinence = score reranker · redondance = cosine    │            │
+│ score = 0.7 × pertinence − 0.3 × redondance          │            │
+│ → TOP_K = 8 chunks diversifiés                       │            │
 └──────────────────────────────────────────────────────┘            │
                 │                                                   │
                 ▼                                                   │
-⑥ GÉNÉRATION — Ollama (llama3.2, local) ◄───────────────────────────┘
+┌──────────────────────────────────────────────────────┐            │
+│ ⑥ CONTEXTE — concatène jusqu'à 4 000 caractères      │            │
+└──────────────────────────────────────────────────────┘            │
+                │                                                   │
+                ▼                                                   │
+⑦ GÉNÉRATION — Ollama (llama3.2, local) ◄───────────────────────────┘
 ```
 
 **Points importants :**
@@ -283,9 +301,16 @@ question
 - **`LEXICAL_WEIGHT = 0.5`** — le lexical pèse moitié moins que le dense. `ts_rank_cd` n'est pas
   BM25 : il récompense les mots fréquents du corpus (« model », « standard »), ce qui fait remonter
   du bruit. À 1.0, un chunk hors sujet apparaissait ; à 0.5, il disparaît.
-- **MMR utilise le score RRF comme pertinence**, pas le cosine. Sinon un chunk trouvé *uniquement*
-  par le lexical (cosine moyen) serait éliminé, ce qui annulerait tout l'intérêt du hybrid.
-  Le cosine sert seulement à mesurer la redondance **entre** candidats.
+- **MMR utilise le score du reranker (ou du RRF) comme pertinence**, pas le cosine. Sinon un
+  chunk trouvé *uniquement* par le lexical (cosine moyen) serait éliminé, ce qui annulerait tout
+  l'intérêt du hybrid. Le cosine sert seulement à mesurer la redondance **entre** candidats.
+- **Le reranker ne remplace ni RRF ni MMR** — chacun a un rôle distinct :
+
+  | Couche | Rôle | Question |
+  |---|---|---|
+  | RRF | **rappel** | quels candidats entrent dans le pool ? |
+  | Reranker | **précision** | lesquels répondent vraiment ? |
+  | MMR | **diversité** | lesquels garder sans répéter ? |
 - **Pas d'index vectoriel à ce jour.** PostgreSQL fait un scan complet (quelques ms pour ~7 000
   chunks). Un index HNSW deviendra utile au-delà de ~100 000 chunks.
 - **Index GIN sur `content_tsv`** — sans lui, le full-text ferait aussi un scan complet.
@@ -304,9 +329,9 @@ question
 | Recherche cosine (Postgres) | ✅ fait |
 | Diversité MMR | ✅ fait |
 | **Hybrid search** (dense + lexical, RRF) | ✅ fait |
-| **Reranker (`bge-reranker-v2-m3`)** | ❌ pas encore |
+| **Reranker (`bge-reranker-v2-m3`)** | ✅ fait |
 | Contextual retrieval | ❌ pas encore |
-| Golden set / évaluation | ❌ pas encore |
+| Golden set / évaluation | 🟡 script A/B (`scripts/eval_retrieval.py`) |
 
 ## Architecture decisions
 
@@ -406,7 +431,7 @@ pour les sections trop longues, puis filtrage et déduplication.
 - **MMR pénalise la redondance** — sans lui, 5 résultats peuvent être 5 variantes du même paragraphe.
   `MMR_LAMBDA = 0.7` = 70 % pertinence, 30 % diversité.
 - **Élargir avant de filtrer** est le principe commun à tous les RAG avancés : c'est ce pool de
-  candidats qu'un reranker exploitera à l'étape suivante.
+  candidats qu'exploite le reranker (décision 9).
 
 ### 7. Contexte borné
 
@@ -435,16 +460,53 @@ puis fusionner les deux classements par **RRF pondéré**.
   à `0.5`, il sort.
 
 **Limites assumées :**
-- `ts_rank_cd` n'a pas la saturation de fréquence de BM25. Le reranker (étape suivante) corrigera
-  le bruit résiduel.
+- `ts_rank_cd` n'a pas la saturation de fréquence de BM25. Le reranker (décision 9) corrige
+  ce bruit résiduel.
 - Configuration `'english'` : une question française ne matche pas lexicalement. Le dense porte
   alors seul, la fusion restant cohérente.
 - Le mode **sparse natif de bge-m3** serait plus fidèle, mais impose de stocker des vecteurs creux
   et un moteur capable de les interroger. Reporté.
 
-### 9. Golden set et évaluation (à venir)
+### 9. Reranker cross-encoder plutôt que similarité de vecteurs seule
 
-**Décision :** construire un jeu de questions/réponses de référence et mesurer **Recall@k** et **MRR**.
+**Décision :** après la fusion RRF, re-trier les 40 candidats avec `BAAI/bge-reranker-v2-m3`,
+puis sélectionner les 8 finaux par MMR.
+
+**Pourquoi :**
+- **Un bi-encoder (bge-m3) encode la question et le chunk séparément** : il compare deux points
+  dans l'espace vectoriel sans jamais lire les deux ensemble. Un **cross-encoder** lit
+  `(question, chunk)` dans la même passe : il juge la pertinence réelle.
+- C'est ce qui élimine le bruit lexical résiduel — par exemple un chunk qui matche les mots
+  « model », « hardware », « standard » sans parler du *Model Hardware Standard*.
+- **Coût O(n)** (un forward par candidat) : d'où son usage en dernière étape sur 40 candidats,
+  jamais sur les 7 000 chunks du corpus.
+
+**Pourquoi MMR reste après le reranker :** le cross-encoder va naturellement remonter plusieurs
+chunks du **même** document (ils sont tous pertinents). Sans MMR, le contexte redevient redondant.
+Le reranker remplace le *signal de pertinence*, pas la *diversification*.
+
+**Sûreté :** `RERANK_ENABLED = False` restaure exactement le comportement précédent. Si le modèle
+ne charge pas (mémoire, réseau), un warning est émis et les scores RRF sont conservés — la
+recherche continue de fonctionner.
+
+**Détail qui compte :** les scores du reranker sont normalisés en **min-max** avant MMR, pas
+divisés par le max. Sinon tous les scores restent tassés près de 1 et la pénalité de redondance
+(0,3) domine : un chunk hors sujet mais divers bat un chunk pertinent mais redondant. Constaté
+sur `Model Hardware Standard` — deux chunks hors sujet entraient dans le top 5.
+
+**Coût mesuré :** 2,3 Go de poids, **+1,1 à 1,2 s par requête** sur MPS (le premier appel paie en
+plus le chargement du modèle, ~7 s). Le ratio « ×15 » affiché par le script est trompeur : il
+compare à une recherche sans reranker qui prend 0,1 s.
+
+### 10. Golden set et évaluation
+
+**Décision :** mesurer chaque amélioration au lieu de la juger à l'œil.
+
+**État actuel :** `scripts/eval_retrieval.py` compare, pour une liste de requêtes fixe, les
+résultats avec et sans reranker (top-k, latence, recouvrement). C'est un A/B manuel.
+
+**Étape suivante :** un vrai golden set (15–20 questions + sources attendues) pour calculer
+**Recall@k** et **MRR** de façon reproductible.
 
 **Pourquoi :** sans mesure, chaque changement (hybrid, reranker, contextual retrieval) est une
 impression subjective. On ne peut pas améliorer ce qu'on ne mesure pas.
@@ -454,9 +516,9 @@ impression subjective. On ne peut pas améliorer ce qu'on ne mesure pas.
 - [x] **0. Nettoyage des données** — trafilatura, chunking Markdown, dédup, filtre de bruit
 - [x] **1. Diversité** — MMR sur un pool élargi de candidats
 - [x] **2. Hybrid search** — dense (pgvector) + lexical (Postgres `tsvector`/`ts_rank_cd`), fusion **RRF**
-- [ ] **3. Reranker** — `bge-reranker-v2-m3` sur 30–50 candidats → top 5
+- [x] **3. Reranker** — `bge-reranker-v2-m3` sur 40 candidats → top 8
 - [ ] **4. Contextual Retrieval** — préfixer chaque chunk d'un résumé du document avant embedding
-- [ ] **5. Évaluation** — golden set, Recall@k, MRR
+- [ ] **5. Évaluation** — golden set, Recall@k, MRR (A/B déjà disponible)
 - [ ] **6. Mémoire persistante** (Redis), interface web, API
 
 > **Ordre choisi :** données propres → diversité → hybrid → rerank → contexte → mesure.
@@ -493,6 +555,9 @@ se font dans une seule transaction (interrompre le script ne laisse jamais de do
 | `LEXICAL_CANDIDATES` | Candidats full-text récupérés | `40` |
 | `RRF_K` | Constante de fusion RRF | `60` |
 | `LEXICAL_WEIGHT` | Poids du lexical dans la fusion | `0.5` |
+| `RERANK_ENABLED` | Active le cross-encoder (sinon scores RRF) | `True` |
+| `RERANK_MODEL` | Modèle de reranking | `BAAI/bge-reranker-v2-m3` |
+| `RERANK_CANDIDATES` | Candidats envoyés au cross-encoder | `40` |
 | `MAX_CONTEXT_LENGTH` | Longueur max du contexte (caractères) | `4000` |
 | `LLM_MODEL` | Modèle Ollama | `llama3.2` |
 | `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` | Génération | `0.7` / `1024` |
@@ -515,7 +580,7 @@ Les prompts se modifient dans `core/generation/prompts.py`.
 | `MPS backend out of memory` | lots trop gros | baisser `EMBEDDING_BATCH_SIZE` dans `core/config.py` |
 | Modèle qui se re-télécharge | cache HF vidé / autre `HF_HOME` | vérifier `~/.cache/huggingface/hub/models--BAAI--bge-m3` |
 | `Ctrl+C` pendant l'ingestion | — | **sans risque** : transaction unique, rien n'est écrit |
-| Résultats hors sujet | bruit lexical résiduel / terme rare | ajuster `LEXICAL_WEIGHT`, ou attendre le reranker (roadmap) |
+| Résultats hors sujet | bruit lexical résiduel / terme rare | ajuster `LEXICAL_WEIGHT` ou `RERANK_CANDIDATES` |
 
 > **Astuce macOS :** l'ingestion dure ~7 min et la veille peut interrompre le process.
 > Préfixez par `caffeinate -i python scripts/ingest.py`.

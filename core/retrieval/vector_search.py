@@ -52,10 +52,15 @@ def _mmr(
     if relevance is None:
         relevance_scores = similarities
     else:
+        # Min-max plutôt que « diviser par le max » : sinon tous les scores
+        # restent tassés près de 1 et la pénalité de redondance (0.3) prend le
+        # dessus — un chunk hors sujet mais divers bat un chunk pertinent mais
+        # redondant.
         relevance_scores = np.asarray(relevance, dtype=np.float32)
-        highest = float(relevance_scores.max())
-        if highest > 0:
-            relevance_scores = relevance_scores / highest
+        lowest = float(relevance_scores.min())
+        spread = float(relevance_scores.max()) - lowest
+        if spread > 0:
+            relevance_scores = (relevance_scores - lowest) / spread
 
     selected: list[int] = []
     remaining = list(range(len(candidates)))
