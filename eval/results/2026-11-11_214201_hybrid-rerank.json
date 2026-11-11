@@ -1,0 +1,153 @@
+{
+  "timestamp": "2026-11-11_214201",
+  "domain": "ai_engineering",
+  "config": "hybrid+rerank",
+  "elapsed_seconds": 40.97,
+  "k": 5,
+  "n": 20,
+  "recall_at_k": 0.95,
+  "mrr": 0.825,
+  "coverage": 0.9,
+  "rows": [
+    {
+      "id": "q01",
+      "question": "What is the ASL-3 Standard?",
+      "rank": 4,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q02",
+      "question": "What is SynthID and how is it used for watermarking?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q03",
+      "question": "What does ISO 42001 certification cover?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q04",
+      "question": "What is the Model Context Protocol (MCP)?",
+      "rank": 4,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q05",
+      "question": "What is Petri, the open-source alignment testing toolbox?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q06",
+      "question": "Model Hardware Standard",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q07",
+      "question": "Which research campus collaborated with Anthropic on the Model Hardware Standard?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q08",
+      "question": "How much did Anthropic raise in its Series G funding round?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q09",
+      "question": "How does Claude watermark generated text?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q10",
+      "question": "What is constitutional AI?",
+      "rank": 1,
+      "found": 3,
+      "expected_n": 3
+    },
+    {
+      "id": "q11",
+      "question": "How does sandboxing work in Claude Code?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q12",
+      "question": "What can Claude's computer use capability do?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q13",
+      "question": "What is alignment faking?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q14",
+      "question": "interpretability",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 3
+    },
+    {
+      "id": "q15",
+      "question": "How does Anthropic approach red teaming?",
+      "rank": 1,
+      "found": 2,
+      "expected_n": 3
+    },
+    {
+      "id": "q16",
+      "question": "How does contextual retrieval improve RAG accuracy?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q17",
+      "question": "What are constitutional classifiers?",
+      "rank": 2,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q18",
+      "question": "What is Claude 3.7 Sonnet?",
+      "rank": 1,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q19",
+      "question": "How does Anthropic use Amazon Trainium chips?",
+      "rank": 2,
+      "found": 1,
+      "expected_n": 1
+    },
+    {
+      "id": "q20",
+      "question": "What is the Anthropic Economic Index?",
+      "rank": null,
+      "found": 0,
+      "expected_n": 3
+    }
+  ]
+}

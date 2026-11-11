@@ -62,7 +62,10 @@ RRF_K = 60                         # Constante RRF (60 = valeur standard de la l
 LEXICAL_WEIGHT = 0.5               # Poids du lexical dans la fusion (< 1 = le dense domine)
 
 # --- Reranker (cross-encoder) ---
-RERANK_ENABLED = True              # False = on garde les scores RRF (A/B testing)
+# Désactivé par défaut : mesuré sur le golden set, il ne gagne rien
+# (Recall@5 0.95 vs 1.00, MRR 0.82 vs 0.84) pour 5,7× plus de temps.
+# Le code reste en place — repasser à True quand le golden set sera plus large.
+RERANK_ENABLED = False             # False = on garde les scores RRF
 RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 RERANK_CANDIDATES = 40             # Candidats envoyés au cross-encoder (coût = O(n))
 
