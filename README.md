@@ -115,11 +115,15 @@ lighthouse-lab/
 │   ├── config.py           # ⭐ Tous les paramètres (modèles, chunking, DB, ...)
 │   ├── db/                 # Connexion, schéma, requêtes SQL
 │   ├── embeddings/         # Encodage des textes (bge-m3)
+│   ├── evaluation/         # Métriques (Recall@k, MRR) — fonctions pures
 │   ├── ingestion/          # Chargement + chunking des documents
 │   ├── retrieval/          # dense + lexical, RRF, reranker, MMR
 │   ├── generation/         # Client Ollama + prompts
 │   ├── memory/             # Historique de conversation
 │   └── rag/                # Orchestrateur du pipeline
+├── eval/
+│   ├── golden/             # Questions de référence (YAML, un fichier par domaine)
+│   └── results/            # Historique des mesures (JSON, versionné)
 ├── data/
 │   ├── raw/                # Documents scrapés (corpus actif)
 │   └── backup/             # Anciens corpus (non ingérés)
@@ -127,7 +131,8 @@ lighthouse-lab/
 │   ├── scrape_anthropic.py # Web scraper (trafilatura)
 │   ├── ingest.py           # Ingestion + déduplication
 │   ├── query.py            # CLI interactive
-│   └── eval_retrieval.py   # A/B avec et sans reranker
+│   ├── eval_golden.py      # Golden set → Recall@k / MRR
+│   └── eval_retrieval.py   # A/B visuel avec et sans reranker
 ├── docker-compose.yml      # PostgreSQL + pgAdmin
 ├── requirements.txt        # Python dependencies
 ├── .env.example            # Environment template (copier en .env)
@@ -165,15 +170,86 @@ print(result["answer"])
 print(result["sources"])
 ```
 
-### Évaluer le retrieval (A/B)
+### Évaluer le retrieval
+
+Deux outils, deux questions différentes :
+
+| Script | Question | Sortie |
+|---|---|---|
+| `scripts/eval_golden.py` | **est-ce que ça s'améliore ?** | Recall@k, MRR, JSON versionné |
+| `scripts/eval_retrieval.py` | **pourquoi ?** | comparaison visuelle côte à côte |
+
+#### Golden set
+
+20 questions de référence, dans `eval/golden/ai_engineering.yaml`. Chaque question
+liste les documents qui **devraient** apparaître dans le top-k.
+
+```bash
+python scripts/eval_golden.py                      # pipeline complet (défaut)
+python scripts/eval_golden.py --config hybrid      # sans reranker
+python scripts/eval_golden.py --config dense       # cosine seule
+python scripts/eval_golden.py --top-k 8
+```
+
+Le script valide le golden set avant de mesurer : chaque `expected_source` doit exister
+en base et chaque `anchor` doit être présent dans le document. Un golden set cassé fait
+échouer la commande — une mesure sur des données invalides ne vaut rien.
+
+| Métrique | Question | Calcul |
+|---|---|---|
+| **Recall@k** | la bonne info est-elle dans le top k ? | 1 si au moins un document attendu est présent |
+| **MRR** | à quel rang arrive le premier bon document ? | moyenne de `1/rang` |
+| **Couverture** | quelle part des documents attendus est retrouvée ? | utile pour les sujets transverses |
+
+Résultat par défaut sauvegardé dans `eval/results/<date>_<config>.json` — l'historique
+est versionné, donc on peut comparer deux mois plus tard.
+
+**Pourquoi des `source` et pas des IDs de chunks ?** Les IDs changent à chaque
+re-découpage. Les noms de fichiers non. Le golden set survit ainsi au re-chunking,
+au re-embedding et au contextual retrieval.
+
+#### Mesure de référence (20 questions, 11/11/2026)
+
+| Configuration | Recall@5 | MRR | Couverture | Temps/question |
+|---|---|---|---|---|
+| `dense` | 0.95 | **0.86** | 0.85 | 0.36 s |
+| `hybrid` | **1.00** | 0.84 | **0.92** | 0.36 s |
+| `hybrid+rerank` | 0.95 | 0.82 | 0.90 | 2.05 s |
+
+**Ce que ça dit :**
+
+- **Le hybrid gagne** : il retrouve un document attendu pour **20 questions sur 20**
+  (contre 19 en dense), grâce au lexical sur `ASL-3`. Coût identique.
+- **Le reranker ne gagne pas** : −5 % de rappel, −0.02 de MRR, pour **5,7× plus de temps**.
+  Vérifié sans MMR : mêmes chiffres (0.95 / 0.82). Ce n'est donc pas MMR qui l'annule,
+  c'est le cross-encoder lui-même qui reclasse mal sur ce corpus.
+  → `RERANK_ENABLED = False` par défaut. Le code reste, le flag permet de le réactiver.
+
+> ⚠️ 20 questions, c'est petit : un écart de 0.05 = **une seule question**. Ces chiffres
+> servent à détecter des régressions franches, pas à départager deux variantes proches.
+> Enrichir le golden set avant de trancher sur des écarts < 0.05.
+
+#### Ajouter une question
+
+```yaml
+- id: q21                     # prochain id libre, ne jamais réutiliser
+  question: "…"
+  category: natural           # acronym | lexical_noise | natural | concept | product
+  expected_sources:
+    - news_le-document.md     # au moins un doit être dans le top-k
+  anchor: "extrait de texte présent dans le document"
+  notes: "pourquoi ce cas est intéressant"
+```
+
+#### Comparaison visuelle (A/B)
 
 ```bash
 python scripts/eval_retrieval.py
 ```
 
-Compare, pour une liste de requêtes fixe, les résultats **avec** et **sans** reranker :
-top-k côte à côte, latence, et nombre de résultats communs. Utile avant/après tout
-changement dans `core/retrieval/`.
+Affiche, pour 4 requêtes, les résultats **avec** et **sans** reranker côte à côte,
+avec la latence et le nombre de résultats communs. Utile pour comprendre *pourquoi*
+un chiffre a bougé, pas pour le mesurer.
 
 ## Data pipeline (ingestion)
 
@@ -270,6 +346,7 @@ question
                 ▼                                                   │
 ┌──────────────────────────────────────────────────────┐            │
 │ ④ RERANKER — cross-encoder (bge-reranker-v2-m3)      │            │
+│ OPTIONNEL · RERANK_ENABLED = False par défaut        │            │
 │ lit (question, chunk) ensemble → pertinence réelle   │            │
 │ → 40 candidats re-triés                              │            │
 └──────────────────────────────────────────────────────┘            │
@@ -277,7 +354,7 @@ question
                 ▼                                                   │
 ┌──────────────────────────────────────────────────────┐            │
 │ ⑤ MMR — Python / numpy                               │            │
-│ pertinence = score reranker · redondance = cosine    │            │
+│ pertinence = reranker ou RRF · redondance = cosine   │            │
 │ score = 0.7 × pertinence − 0.3 × redondance          │            │
 │ → TOP_K = 8 chunks diversifiés                       │            │
 └──────────────────────────────────────────────────────┘            │
@@ -311,6 +388,8 @@ question
   | RRF | **rappel** | quels candidats entrent dans le pool ? |
   | Reranker | **précision** | lesquels répondent vraiment ? |
   | MMR | **diversité** | lesquels garder sans répéter ? |
+- **Le reranker est désactivé par défaut**, sur la foi du golden set : Recall@5 0.95 contre 1.00
+  sans lui, MRR 0.82 contre 0.84, pour 5,7× plus de temps. Le module et le flag restent en place.
 - **Pas d'index vectoriel à ce jour.** PostgreSQL fait un scan complet (quelques ms pour ~7 000
   chunks). Un index HNSW deviendra utile au-delà de ~100 000 chunks.
 - **Index GIN sur `content_tsv`** — sans lui, le full-text ferait aussi un scan complet.
@@ -329,9 +408,9 @@ question
 | Recherche cosine (Postgres) | ✅ fait |
 | Diversité MMR | ✅ fait |
 | **Hybrid search** (dense + lexical, RRF) | ✅ fait |
-| **Reranker (`bge-reranker-v2-m3`)** | ✅ fait |
+| **Reranker (`bge-reranker-v2-m3`)** | ✅ code fait · ⚪ désactivé (mesuré sans gain) |
 | Contextual retrieval | ❌ pas encore |
-| Golden set / évaluation | 🟡 script A/B (`scripts/eval_retrieval.py`) |
+| **Golden set / évaluation** | ✅ 20 questions, Recall@5 / MRR |
 
 ## Architecture decisions
 
@@ -498,15 +577,41 @@ sur `Model Hardware Standard` — deux chunks hors sujet entraient dans le top 5
 plus le chargement du modèle, ~7 s). Le ratio « ×15 » affiché par le script est trompeur : il
 compare à une recherche sans reranker qui prend 0,1 s.
 
+**Verdict du golden set (11/11/2026) — le reranker n'est pas rentable ici :**
+
+| Configuration | Recall@5 | MRR | Temps/question |
+|---|---|---|---|
+| `hybrid` (sans reranker) | **1.00** | **0.84** | 0.36 s |
+| `hybrid+rerank` | 0.95 | 0.82 | 2.05 s |
+
+Il fait perdre un document attendu, dégrade légèrement le MRR, et coûte **5,7× plus cher**.
+Vérification faite **sans MMR** (prendre directement son top-5) : mêmes chiffres — ce n'est donc
+pas MMR qui l'annule, c'est le cross-encoder lui-même qui reclasse mal sur ce corpus.
+→ `RERANK_ENABLED = False` par défaut. Le module reste en place : c'est un flag à réactiver
+quand le golden set sera plus large, ou avec un autre modèle.
+
 ### 10. Golden set et évaluation
 
 **Décision :** mesurer chaque amélioration au lieu de la juger à l'œil.
 
-**État actuel :** `scripts/eval_retrieval.py` compare, pour une liste de requêtes fixe, les
-résultats avec et sans reranker (top-k, latence, recouvrement). C'est un A/B manuel.
+**Ce qui existe :** `eval/golden/ai_engineering.yaml` — 20 questions couvrant 5 catégories
+(acronyme, bruit lexical, question naturelle, concept transverse, produit). Chaque question
+liste ses documents attendus. `scripts/eval_golden.py` calcule **Recall@5**, **MRR** et la
+**couverture**, et sauvegarde un JSON dans `eval/results/`.
 
-**Étape suivante :** un vrai golden set (15–20 questions + sources attendues) pour calculer
-**Recall@k** et **MRR** de façon reproductible.
+**Pourquoi des `source` et pas des IDs de chunks :** les IDs changent à chaque re-découpage.
+Le golden set doit survivre au chunking, au re-embedding et au contextual retrieval — sinon
+il faut le refaire à chaque expérience.
+
+**Validation intégrée :** le script vérifie que chaque source existe en base et que chaque
+ancre est présente dans le document. Un golden set périmé échoue bruyamment au lieu de
+produire des chiffres faux.
+
+**Limite assumée :** 20 questions, c'est petit. Un écart de 0.05 = une question. Le golden set
+détecte les régressions franches, pas les gains marginaux. Il s'enrichit au fil des domaines.
+
+**Ce que ça a déjà changé :** le reranker a été désactivé sur la base de ces chiffres
+(décision 9) — alors qu'il « semblait » meilleur à l'œil sur les tests manuels.
 
 **Pourquoi :** sans mesure, chaque changement (hybrid, reranker, contextual retrieval) est une
 impression subjective. On ne peut pas améliorer ce qu'on ne mesure pas.
@@ -516,13 +621,15 @@ impression subjective. On ne peut pas améliorer ce qu'on ne mesure pas.
 - [x] **0. Nettoyage des données** — trafilatura, chunking Markdown, dédup, filtre de bruit
 - [x] **1. Diversité** — MMR sur un pool élargi de candidats
 - [x] **2. Hybrid search** — dense (pgvector) + lexical (Postgres `tsvector`/`ts_rank_cd`), fusion **RRF**
-- [x] **3. Reranker** — `bge-reranker-v2-m3` sur 40 candidats → top 8
+- [x] **3. Reranker** — `bge-reranker-v2-m3` implémenté, **désactivé** (mesuré sans gain)
 - [ ] **4. Contextual Retrieval** — préfixer chaque chunk d'un résumé du document avant embedding
-- [ ] **5. Évaluation** — golden set, Recall@k, MRR (A/B déjà disponible)
-- [ ] **6. Mémoire persistante** (Redis), interface web, API
+- [x] **5. Évaluation** — golden set 20 questions, Recall@5 / MRR / couverture
+- [ ] **6. Variantes de chunking** — tables séparées, comparées sur le golden set
+- [ ] **7. Mémoire persistante** (Redis), interface web, API
 
-> **Ordre choisi :** données propres → diversité → hybrid → rerank → contexte → mesure.
+> **Ordre choisi :** données propres → diversité → hybrid → rerank → **mesure** → contexte.
 > Un reranker ne sauve pas un corpus pollué : nettoyer d'abord est le gain le plus rentable.
+> Et sans golden set, on ne sait pas si une couche aide — le reranker en est la preuve.
 
 ## Development
 
@@ -555,7 +662,7 @@ se font dans une seule transaction (interrompre le script ne laisse jamais de do
 | `LEXICAL_CANDIDATES` | Candidats full-text récupérés | `40` |
 | `RRF_K` | Constante de fusion RRF | `60` |
 | `LEXICAL_WEIGHT` | Poids du lexical dans la fusion | `0.5` |
-| `RERANK_ENABLED` | Active le cross-encoder (sinon scores RRF) | `True` |
+| `RERANK_ENABLED` | Active le cross-encoder (sinon scores RRF) | `False` |
 | `RERANK_MODEL` | Modèle de reranking | `BAAI/bge-reranker-v2-m3` |
 | `RERANK_CANDIDATES` | Candidats envoyés au cross-encoder | `40` |
 | `MAX_CONTEXT_LENGTH` | Longueur max du contexte (caractères) | `4000` |

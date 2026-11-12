@@ -1,0 +1,209 @@
+# =============================================================================
+# Golden set — domaine « ai_engineering »
+#
+# Rôle : jeu de questions de référence pour mesurer le retrieval.
+#        Chaque question liste les documents qui DEVRAIENT apparaître dans le
+#        top-k. Le script scripts/eval_golden.py en déduit Recall@k et MRR.
+#
+# Pourquoi des `source` et pas des IDs de chunks ?
+#   Les IDs changent dès qu'on re-découpe le corpus. Les noms de fichiers, non.
+#   Le golden set survit donc au re-chunking, au re-embedding et au
+#   contextual retrieval. C'est ce qui le rend réutilisable.
+#
+# Champs :
+#   id               identifiant stable (q01, q02, …) — ne jamais réutiliser
+#   question         la requête telle qu'un utilisateur l'écrirait
+#   category         à quoi sert ce cas (voir la liste ci-dessous)
+#   expected_sources documents pertinents — au moins UN doit être dans le top-k
+#   anchor           extrait de texte présent dans le 1er expected_source
+#                    (sert à vérifier que le golden set reste valide)
+#   notes            pourquoi ce cas est intéressant
+#
+# Catégories :
+#   acronym           acronyme / terme rare — le dense seul peut le rater
+#   lexical_noise     mots courants qui font remonter du bruit en full-text
+#   natural           question formulée naturellement
+#   concept           sujet transverse, souvent couvert par plusieurs documents
+#   product           nom de produit / partenariat / chiffre précis
+#
+# Ajouter une question : copier un bloc, prendre le prochain id libre, vérifier
+# que les `source` existent en base (le script le fait automatiquement).
+# =============================================================================
+
+domain: ai_engineering
+version: 1
+updated: "2026-11-11"
+
+questions:
+  # --- Acronymes / termes rares -------------------------------------------
+  - id: q01
+    question: "What is the ASL-3 Standard?"
+    category: acronym
+    expected_sources:
+      - news_activating-asl3-protections.md
+    anchor: "The ASL-3 Standard requires a higher level of defense against both deployment and security threats"
+    notes: "Acronyme à trait d'union et chiffre : cas difficile pour le dense seul."
+
+  - id: q02
+    question: "What is SynthID and how is it used for watermarking?"
+    category: acronym
+    expected_sources:
+      - news_claude-text-watermark.md
+    anchor: "In the SynthID-Text paper, which introduced the technique we use"
+    notes: "Nom propre rare, présent dans seulement 2 chunks."
+
+  - id: q03
+    question: "What does ISO 42001 certification cover?"
+    category: acronym
+    expected_sources:
+      - news_anthropic-achieves-iso-42001-certification-for-responsible-ai.md
+    anchor: "ISO 42001 is the first international standard outlining requirements for AI governance"
+    notes: "Numéro de norme : le full-text doit matcher '42001' exactement."
+
+  - id: q04
+    question: "What is the Model Context Protocol (MCP)?"
+    category: acronym
+    expected_sources:
+      - news_model-context-protocol.md
+    anchor: "open-sourcing the Model Context Protocol (MCP)"
+    notes: "Acronyme très fréquent dans le corpus (MCP) : teste la précision, pas le rappel."
+
+  - id: q05
+    question: "What is Petri, the open-source alignment testing toolbox?"
+    category: acronym
+    expected_sources:
+      - research_donating-open-source-petri.md
+    anchor: "we launched Petri, an open-source toolbox of alignment tests"
+    notes: "Nom propre court, noyé dans un corpus de 486 documents."
+
+  # --- Bruit lexical ------------------------------------------------------
+  - id: q06
+    question: "Model Hardware Standard"
+    category: lexical_noise
+    expected_sources:
+      - news_model-hardware-standard-research-preview.md
+    anchor: "a shared specification for AI agents to safely operate physical devices"
+    notes: "Trois mots courants : le full-text fait remonter du bruit (d'où LEXICAL_WEIGHT=0.5)."
+
+  - id: q07
+    question: "Which research campus collaborated with Anthropic on the Model Hardware Standard?"
+    category: lexical_noise
+    expected_sources:
+      - news_model-hardware-standard-research-preview.md
+    anchor: "collaboration between Anthropic and HHMI Janelia Research Campus"
+    notes: "Réponse = nom propre rare (HHMI Janelia), absent du vocabulaire courant."
+
+  - id: q08
+    question: "How much did Anthropic raise in its Series G funding round?"
+    category: lexical_noise
+    expected_sources:
+      - news_anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation.md
+    anchor: "$30 billion in Series G funding led by GIC and Coatue"
+    notes: "Chiffre + lettre de série : le dense est faible sur les valeurs numériques."
+
+  # --- Questions naturelles ----------------------------------------------
+  - id: q09
+    question: "How does Claude watermark generated text?"
+    category: natural
+    expected_sources:
+      - news_claude-text-watermark.md
+    anchor: "Future Claude models will generate text that contains a watermark"
+    notes: "Question complète : doit retrouver l'article sur le watermarking."
+
+  - id: q10
+    question: "What is constitutional AI?"
+    category: natural
+    expected_sources:
+      - news_claudes-constitution.md
+      - research_constitutional-ai-harmlessness-from-ai-feedback.md
+      - research_collective-constitutional-ai-aligning-a-language-model-with-public-input.md
+    anchor: "giving language models explicit values determined by a constitution"
+    notes: "Sujet transverse couvert par 3 documents : teste le rappel multi-sources."
+
+  - id: q11
+    question: "How does sandboxing work in Claude Code?"
+    category: natural
+    expected_sources:
+      - research_claude-code-sandboxing.md
+    anchor: "two new features in Claude Code built on top of sandboxing"
+    notes: "Nom de produit + concept technique dans la même requête."
+
+  - id: q12
+    question: "What can Claude's computer use capability do?"
+    category: natural
+    expected_sources:
+      - news_3-5-models-and-computer-use.md
+    anchor: "groundbreaking new capability in public beta"
+    notes: "Capacité annoncée dans un article de release."
+
+  - id: q13
+    question: "What is alignment faking?"
+    category: natural
+    expected_sources:
+      - research_alignment-faking.md
+    anchor: "someone appears to share our views or values, but is in fact only pretending"
+    notes: "Concept nommé, mais formulation naturelle sans le terme exact en tête."
+
+  # --- Concepts transverses ----------------------------------------------
+  - id: q14
+    question: "interpretability"
+    category: concept
+    expected_sources:
+      - research_interpretability-dreams.md
+      - research_crosscoder-model-diffing.md
+      - research_auditing-hidden-objectives.md
+    anchor: "create a foundation for mechanistic interpretability research"
+    notes: "Un seul mot, très fréquent : teste la diversité du MMR (pas 8 chunks du même doc)."
+
+  - id: q15
+    question: "How does Anthropic approach red teaming?"
+    category: concept
+    expected_sources:
+      - news_frontier-threats-red-teaming-for-ai-safety.md
+      - news_challenges-in-red-teaming-ai-systems.md
+      - research_strategic-warning-for-ai-risk-progress-and-insights-from-our-frontier-red-team.md
+    anchor: "or adversarial testing, is a recognized technique to measure and increase the safety and security of systems"
+    notes: "Concept transverse couvert par 5 documents ; les 3 listés sont les références."
+
+  - id: q16
+    question: "How does contextual retrieval improve RAG accuracy?"
+    category: concept
+    expected_sources:
+      - research_contextual-retrieval.md
+    anchor: "For an AI model to be useful in specific contexts"
+    notes: "Article méthodologique : le vocabulaire est proche de nos propres docs."
+
+  - id: q17
+    question: "What are constitutional classifiers?"
+    category: concept
+    expected_sources:
+      - research_constitutional-classifiers.md
+    anchor: "Large language models have extensive safety training"
+    notes: "Terme composé de deux mots courants : ambiguïté avec 'constitutional AI'."
+
+  # --- Produits / partenariats / chiffres --------------------------------
+  - id: q18
+    question: "What is Claude 3.7 Sonnet?"
+    category: product
+    expected_sources:
+      - news_claude-3-7-sonnet.md
+    anchor: "our most intelligent model to date and the first hybrid reasoning model"
+    notes: "Version de modèle : chiffre et point dans le nom (3.7)."
+
+  - id: q19
+    question: "How does Anthropic use Amazon Trainium chips?"
+    category: product
+    expected_sources:
+      - news_anthropic-amazon-trainium.md
+    anchor: "an expansion of our collaboration with Amazon Web"
+    notes: "Partenariat + matériel : deux entités dans une seule requête."
+
+  - id: q20
+    question: "What is the Anthropic Economic Index?"
+    category: product
+    expected_sources:
+      - research_the-anthropic-economic-index.md
+      - research_economic-index-primitives.md
+      - research_economic-index-geography.md
+    anchor: "launching the Anthropic Economic Index, an initiative aimed at understanding"
+    notes: "Plusieurs rapports portent ce nom : teste le rappel sur une famille de documents."
