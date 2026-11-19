@@ -19,6 +19,8 @@ Lighthouse is a RAG (Retrieval-Augmented Generation) system designed to:
 | Chunking | `langchain-text-splitters` (Markdown-aware) | Sections sémantiques plutôt que coupes arbitraires |
 | Recherche | pgvector (dense) + Postgres FTS (lexical), fusion RRF | Comprend le sens **et** les termes exacts, sans dépendance supplémentaire |
 | Extraction | `trafilatura` | Supprime nav/footer/boilerplate automatiquement |
+| Interface web | React, TypeScript et Vite | Chat et consultation des passages |
+| API locale | FastAPI et Uvicorn | Expose le pipeline RAG à l’interface |
 
 ## Prerequisites
 
@@ -36,7 +38,18 @@ Lighthouse is a RAG (Retrieval-Augmented Generation) system designed to:
 
 ## Quick Start
 
-### 1. Start PostgreSQL
+### 1. Set Up Environment
+
+```bash
+# Copier le modèle de configuration
+cp .env.example .env
+
+# Éditer .env : identifiants PostgreSQL, pgAdmin, modèle Ollama
+```
+
+> `.env` est ignoré par git. Ne le commitez jamais — les mots de passe y sont en clair.
+
+### 2. Start PostgreSQL
 
 ```bash
 docker compose up -d
@@ -53,17 +66,6 @@ Deux conteneurs démarrent :
 
 > **Le schéma est appliqué automatiquement**, mais **uniquement au premier démarrage**
 > (volume `pgdata` vide). Voir *Database management* pour réinitialiser.
-
-### 2. Set Up Environment
-
-```bash
-# Copier le modèle de configuration
-cp .env.example .env
-
-# Éditer .env : identifiants PostgreSQL, pgAdmin, modèle Ollama
-```
-
-> `.env` est ignoré par git. Ne le commitez jamais — les mots de passe y sont en clair.
 
 ### 3. Install Dependencies
 
@@ -107,10 +109,45 @@ python scripts/ingest.py
 python scripts/query.py
 ```
 
+### 8. Lancer l’interface web
+
+Une fois les dépendances Python installées, le corpus ingéré et PostgreSQL
+et Ollama démarrés, lance FastAPI depuis la racine du dépôt dans un terminal.
+
+```bash
+venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+
+Dans un deuxième terminal, utilise Node.js 22.12 ou une version ultérieure
+compatible avec Vite 7. Si tu utilises le Node.js installé dans le projet,
+ajoute `export PATH="$PWD/.tools/node/bin:$PATH"` après `cd web`.
+
+```bash
+cd web
+npm ci
+npm run dev
+```
+
+`npm ci` prépare les dépendances au premier lancement et après un changement du
+lockfile. Ouvre l’URL affichée par Vite, normalement
+[http://127.0.0.1:5173/](http://127.0.0.1:5173/), pose une question et clique sur
+**Send**. **Sources** déplie les passages sous chaque réponse. **Original
+documents** indique les noms des fichiers retrouvés.
+
+Vite relaie `POST /api/ask` vers FastAPI. Le pipeline cherche les passages dans
+PostgreSQL, puis demande à Ollama de générer la réponse. Les chats sont
+actuellement en mémoire. L’actualisation de la page efface leur liste côté React
+et le redémarrage de l’API efface la mémoire Python.
+
+Voir [Architecture du chat et conception de l’historique](docs/chat-architecture.md).
+
 ## Project Structure
 
 ```
 lighthouse-lab/
+├── api/                    # Endpoint FastAPI du chat
+├── web/                    # Interface React, TypeScript et proxy Vite
+├── docs/                   # Architecture du chat et historique proposé
 ├── core/
 │   ├── config.py           # ⭐ Tous les paramètres (modèles, chunking, DB, ...)
 │   ├── db/                 # Connexion, schéma, requêtes SQL
@@ -625,7 +662,8 @@ impression subjective. On ne peut pas améliorer ce qu'on ne mesure pas.
 - [ ] **4. Contextual Retrieval** — préfixer chaque chunk d'un résumé du document avant embedding
 - [x] **5. Évaluation** — golden set 20 questions, Recall@5 / MRR / couverture
 - [ ] **6. Variantes de chunking** — tables séparées, comparées sur le golden set
-- [ ] **7. Mémoire persistante** (Redis), interface web, API
+- [x] **7. Interface web et API** — chat local et passages consultables
+- [ ] **8. Conversations persistantes** — stockage PostgreSQL et réouverture des chats
 
 > **Ordre choisi :** données propres → diversité → hybrid → rerank → **mesure** → contexte.
 > Un reranker ne sauve pas un corpus pollué : nettoyer d'abord est le gain le plus rentable.
